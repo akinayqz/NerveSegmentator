@@ -11,6 +11,9 @@ test_data/
 .venv*/
 .nerveseg_data/
 
+# Local Spinal Cord Toolbox checkout that sct/*.patch is developed in
+.sct-dev/
+
 # Python
 __pycache__/
 *.py[cod]

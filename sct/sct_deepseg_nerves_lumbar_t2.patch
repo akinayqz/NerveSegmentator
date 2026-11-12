@@ -1,0 +1,332 @@
+diff --git a/documentation/source/user_section/command-line/deepseg/nerves_lumbar_t2.rst b/documentation/source/user_section/command-line/deepseg/nerves_lumbar_t2.rst
+new file mode 100644
+index 0000000..ab33074
+--- /dev/null
++++ b/documentation/source/user_section/command-line/deepseg/nerves_lumbar_t2.rst
+@@ -0,0 +1,9 @@
++.. _sct_deepseg_nerves_lumbar_t2:
++
++nerves_lumbar_t2
++================
++
++.. argparse::
++   :ref: spinalcordtoolbox.scripts.sct_deepseg.nerves_lumbar_t2
++   :prog: sct_deepseg nerves_lumbar_t2
++   :markdownhelp:
+diff --git a/documentation/source/user_section/command-line/sct_deepseg.rst b/documentation/source/user_section/command-line/sct_deepseg.rst
+index b99580f..d6948e0 100644
+--- a/documentation/source/user_section/command-line/sct_deepseg.rst
++++ b/documentation/source/user_section/command-line/sct_deepseg.rst
+@@ -214,3 +214,4 @@ If you absolutely require these models, you can downgrade to version of SCT list
+    deepseg/canal
+    deepseg/sc_canal_t2
+    deepseg/spine
++   deepseg/nerves_lumbar_t2
+diff --git a/spinalcordtoolbox/deepseg/inference.py b/spinalcordtoolbox/deepseg/inference.py
+index eb08112..f384758 100644
+--- a/spinalcordtoolbox/deepseg/inference.py
++++ b/spinalcordtoolbox/deepseg/inference.py
+@@ -33,6 +33,8 @@ import spinalcordtoolbox.sc_crop as sc_crop
+ from spinalcordtoolbox.utils.sys import LazyLoader, stylize
+ 
+ nib = LazyLoader("nib", globals(), "nibabel")
++# NB: `nervesegmentator` is an optional package (`sct_deepseg` tells the user how to install it)
++nervesegmentator = LazyLoader("nervesegmentator", globals(), "nervesegmentator")
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -131,6 +133,10 @@ def segment_non_ivadomed(path_model, model_type, input_filenames, threshold, kee
+     if os.path.basename(path_model) in ds_models.TASKS['spine']['models']:
+         def create_net(pm, _): return pm  # just echo `path_model` back as 'net'
+         inference = segment_totalspineseg
++    # NB: For NerveSegmentator, the package creates the networks (one per structure) and runs them
++    elif os.path.basename(path_model) in ds_models.TASKS['nerves_lumbar_t2']['models']:
++        create_net = create_nervesegmentator
++        inference = segment_nervesegmentator
+     elif model_type == "monai":
+         create_net = ds_monai.create_nnunet_from_plans
+         inference = segment_monai
+@@ -522,3 +528,58 @@ def segment_totalspineseg(path_img, tmpdir, predictor, device, label_vert=False)
+         targets.append(f"_{name_remapping[output_dirname]}")
+ 
+     return fnames_out, targets
++
++
++def create_nervesegmentator(path_model, device: torch.device, single_fold: bool = False, test_time_aug: bool = False):
++    """
++    Load the networks of NerveSegmentator (one per structure: dorsal root ganglia, nerve roots).
++
++    For quicker inference using only a single fold per network (instead of the full ensemble), set `single_fold=True`.
++    """
++    [contrast] = ds_models.MODELS[os.path.basename(path_model)]['contrasts']
++    return nervesegmentator.NerveSegmentator(
++        contrast=contrast,
++        device=device,
++        fast=single_fold,
++        tta=test_time_aug,  # mirroring on the axes the networks were trained with (left-right)
++        # nervesegmentator's models are installed in SCT's model folder (see `models.install_model`)
++        data_dir=path_model,
++    )
++
++
++def segment_nervesegmentator(path_img, tmpdir, predictor, device, spine_seg=None):
++    """
++    Segment lumbosacral dorsal root ganglia and nerve roots using NerveSegmentator.
++
++    The networks need to know where each voxel is relative to the spine, which the package works out from a
++    TotalSpineSeg segmentation of the image.
++
++    :param predictor: `nervesegmentator.NerveSegmentator` object, as returned by `create_nervesegmentator`.
++    :param spine_seg: Filename of the spine segmentation of the image: the `_totalspineseg_all` output of
++        `sct_deepseg spine`. If not provided, the spine is segmented first.
++    """
++    if spine_seg is None:
++        name_model_spine = ds_models.TASKS['spine']['models'][0]
++        path_model_spine = ds_models.folder(name_model_spine)
++        if not ds_models.is_valid(ds_models.find_model_folder_paths(path_model_spine)):
++            logger.info(f"Model {name_model_spine} is not installed. Installing it now...")
++            ds_models.install_model(name_model_spine)
++        logger.info("No spine segmentation was provided (`-spine-seg`), so segmenting the spine first...")
++        tmpdir_spine = os.path.join(tmpdir, 'totalspineseg')
++        os.mkdir(tmpdir_spine)
++        fnames_spine, targets_spine = segment_totalspineseg(path_img, tmpdir_spine, path_model_spine, device)
++        spine_seg = fnames_spine[targets_spine.index("_totalspineseg_all")]
++
++    # nervesegmentator handles the orientation of the image and the label values itself, and reports
++    # (through `logging`) anything unusual about the discs that the spinal levels are anchored to
++    [result] = predictor.run(path_img, tmpdir, spine_seg=spine_seg)
++    if result.status == "failed":
++        # e.g. the spinal levels can't be anchored because the spine segmentation has no L5-S1 disc
++        raise ValueError(f"NerveSegmentator could not segment '{path_img}': {' '.join(result.errors)}")
++
++    fnames_out, targets = [], []
++    for structure, fname_out in result.outputs.items():  # 'drg', 'root'
++        fnames_out.append(str(fname_out))
++        targets.append(f"_{structure}")
++
++    return fnames_out, targets
+diff --git a/spinalcordtoolbox/deepseg/models.py b/spinalcordtoolbox/deepseg/models.py
+index 2c2730a..b757eb1 100644
+--- a/spinalcordtoolbox/deepseg/models.py
++++ b/spinalcordtoolbox/deepseg/models.py
+@@ -22,6 +22,7 @@ from spinalcordtoolbox.utils.sys import stylize, __deepseg_dir__, LazyLoader
+ 
+ tss_init = LazyLoader("tss_init", globals(), 'totalspineseg.init_inference')
+ auglab_add_trainer = LazyLoader("auglab_add_trainer", globals(), 'auglab.add_trainer')
++nerveseg_weights = LazyLoader("nerveseg_weights", globals(), 'nervesegmentator.weights')
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -250,6 +251,19 @@ MODELS = {
+         "thr": None,
+         "default": False,
+      },
++    "model_seg_nerves_lumbar_t2": {
++        # NB: This is two nnUNet models, one per structure, which are installed and run by the `nervesegmentator`
++        #     package. The keys are the names of the models in that package.
++        "url": {
++            "drg_t2": ["https://github.com/akinayqz/NerveSegmentator/releases/download/rYYYYMMDD/drg_t2_rYYYYMMDD.zip"],
++            "root_t2": ["https://github.com/akinayqz/NerveSegmentator/releases/download/rYYYYMMDD/root_t2_rYYYYMMDD.zip"],
++        },
++        "description": "Segmentation of lumbosacral (L2-S1) dorsal root ganglia and nerve roots on T2w contrast",
++        "contrasts": ["t2"],
++        "framework": "nnunetv2",
++        "thr": None,  # Multiclass models (one value per spinal level) -> no thresholding
++        "default": False,
++    },
+ }
+ 
+ 
+@@ -628,6 +642,23 @@ TASKS = {
+          'group': 'gray_matter',
+          'priority': 1  # Push gray matter to the top of its eponymous category
+          },
++    'nerves_lumbar_t2':
++        {'description': 'Segmentation of lumbosacral dorsal root ganglia and nerve roots (L2-S1) for T2w contrast',
++         'long_description': 'NerveSegmentator segments the dorsal root ganglia and the nerve roots of the L2 to S1 '
++                             'spinal nerves, using one 3D U-Net per structure, trained with the nnUNetV2 framework. '
++                             'Both are multiclass models: each outputs a single segmentation image in which the '
++                             'value is the spinal level of the nerve (L2: 2, L3: 3, L4: 4, L5: 5, S1: 1), with the '
++                             'left and right sides sharing a value. In addition to the image, the models are given '
++                             'the position of each voxel relative to the spine (level along the spinal canal, and '
++                             'distance left or right of it). This is derived from the spinal canal and the '
++                             'intervertebral discs of a TotalSpineSeg segmentation of the image, which is computed '
++                             'if it is not provided, so the levels are only as reliable as the disc labels in '
++                             'that segmentation. Training data consists of coronal 3D T2w images at 1 mm isotropic '
++                             'resolution (35 images for the ganglia, 34 for the roots).',
++         'url': 'https://github.com/akinayqz/NerveSegmentator',
++         'models': ['model_seg_nerves_lumbar_t2'],
++         'citation': None
++         },
+ }
+ 
+ 
+@@ -798,6 +829,17 @@ def install_model(name_model, custom_url=None):
+             #    See: https://github.com/neuropoly/totalspineseg/issues/126
+             # Since `install_model`` will only be invoked on first run or if model is outdated, it's safe to always overwrite
+             auglab_add_trainer.add_trainer(trainer_name="nnUNetTrainerDAExt", overwrite=True)
++        # nervesegmentator handles data downloading itself too, and keeps its own folder structure
++        elif name_model in TASKS['nerves_lumbar_t2']['models']:
++            for model_urls in url_field.values():
++                # nervesegmentator expects exactly 1 URL string per model (rather than a list of mirrors)
++                nerveseg_weights.install_url(model_urls[0], data=folder(name_model))
++            urls_used = url_field
++            # These models need a spine segmentation of the image, which `sct_deepseg` computes with
++            # totalspineseg if it is not provided. So, make sure that totalspineseg can be run, too.
++            name_model_spine = TASKS['spine']['models'][0]
++            if not is_valid(find_model_folder_paths(folder(name_model_spine))):
++                install_model(name_model_spine)
+         else:
+             urls_used = {}
+             for i, (seed_name, model_urls) in enumerate(url_field.items()):
+diff --git a/spinalcordtoolbox/scripts/sct_deepseg.py b/spinalcordtoolbox/scripts/sct_deepseg.py
+index ebf3bde..26e7b48 100755
+--- a/spinalcordtoolbox/scripts/sct_deepseg.py
++++ b/spinalcordtoolbox/scripts/sct_deepseg.py
+@@ -12,6 +12,7 @@
+ # TODO: accommodate multiclass segmentation
+ 
+ from argparse import SUPPRESS, Action
++from importlib.util import find_spec
+ import json
+ import os
+ import sys
+@@ -314,6 +315,15 @@ def get_parser(subparser_to_return=None):
+                      "More details on TotalSpineSeg's two models can be found here: https://github.com/neuropoly/totalspineseg/?tab=readme-ov-file#model-description",
+                 choices=(0, 1),
+                 default=0)
++        if task_name == 'nerves_lumbar_t2':  # nervesegmentator
++            input_output.add_argument(
++                "-spine-seg",
++                help="Spine segmentation of the input image, as output by `sct_deepseg spine` (the file ending with "
++                     "'_totalspineseg_all.nii.gz'). The nerves are assigned to spinal levels using its "
++                     "intervertebral disc labels, so make sure that the discs are labeled correctly.\n"
++                     "If not provided, the spine is segmented first (as `sct_deepseg spine` would), and that "
++                     "segmentation is not saved.",
++                metavar=Metavar.file)
+         if task_name in ('lesion_ms', 'spinalcord'):
+             # Add possibility of having soft segmentation output
+             params.add_argument(
+@@ -322,7 +332,7 @@ def get_parser(subparser_to_return=None):
+                 help="If set, the model will output a soft segmentation (i.e. float between 0 and 1) instead of a binary "
+                      "segmentation."
+             )
+-        if task_name == 'lesion_ms':
++        if task_name in ('lesion_ms', 'nerves_lumbar_t2'):
+             # Add possibility of segmenting on only 1 fold for quicker inference
+             params.add_argument(
+                 "-single-fold",
+@@ -392,6 +402,12 @@ def main(argv: Sequence[str]):
+     verbose = arguments.v
+     set_loglevel(verbose=verbose, caller_module_name=__name__)
+ 
++    # The models of 'nerves_lumbar_t2' are installed and run by a package that doesn't come with SCT
++    if arguments.task == 'nerves_lumbar_t2' and find_spec('nervesegmentator') is None:
++        parser.error(f"The task '{arguments.task}' requires the 'nervesegmentator' package, which is not installed "
++                     f"in SCT's Python environment. To install it, run:\n\n"
++                     f"    {sys.executable} -m pip install nervesegmentator\n")
++
+     if arguments.install:
+         models_to_install = models.TASKS[arguments.task]['models']
+         if arguments.custom_url:
+@@ -421,6 +437,16 @@ def main(argv: Sequence[str]):
+         if not os.path.isfile(file):
+             parser.error(f"This file does not exist: {file}")
+ 
++    # Check the inputs that are specific to 'nerves_lumbar_t2'
++    if arguments.task == 'nerves_lumbar_t2':
++        # NB: The output filenames are based on the first input image, so the outputs of a second image would
++        #     overwrite those of the first.
++        if len(arguments.i) > 1:
++            parser.error(f"{len(arguments.i)} input files found. Please provide a single input file for the task "
++                         f"{arguments.task}.")
++        if arguments.spine_seg is not None and not os.path.isfile(arguments.spine_seg):
++            parser.error(f"This file does not exist: {arguments.spine_seg}")
++
+     # Get pipeline model names
+     name_models = models.TASKS[arguments.task]['models']
+ 
+@@ -519,7 +545,7 @@ def main(argv: Sequence[str]):
+             # Pass any "extra" kwargs defined only for specific models/tasks
+             extra_network_kwargs = {
+                 arg_name: getattr(arguments, arg_name)
+-                # "single_fold" -> used only by lesion_ms
++                # "single_fold" -> used only by lesion_ms and nerves_lumbar_t2
+                 # "test_time_aug" -> used only by nnunetv2 models
+                 for arg_name in ["single_fold", "test_time_aug"]
+                 if hasattr(arguments, arg_name)
+@@ -528,7 +554,8 @@ def main(argv: Sequence[str]):
+                 arg_name: getattr(arguments, arg_name)
+                 # "label_vert" -> used only by spine
+                 # "soft_seg" -> used only by lesion_ms and spinalcord
+-                for arg_name in ["label_vert", "soft_seg"]
++                # "spine_seg" -> used only by nerves_lumbar_t2
++                for arg_name in ["label_vert", "soft_seg", "spine_seg"]
+                 if hasattr(arguments, arg_name)
+             }
+             # The MS lesion model is multifold, which requires turning on the "ensemble averaging" behavior
+diff --git a/testing/cli/test_sct_deepseg.py b/testing/cli/test_sct_deepseg.py
+index 6522a77..627201c 100644
+--- a/testing/cli/test_sct_deepseg.py
++++ b/testing/cli/test_sct_deepseg.py
+@@ -5,6 +5,7 @@ import os
+ import shlex
+ import shutil
+ from pathlib import Path
++from types import SimpleNamespace
+ from unittest import mock
+ 
+ import pytest
+@@ -16,6 +17,7 @@ import spinalcordtoolbox as sct
+ from spinalcordtoolbox.image import Image, compute_dice, add_suffix, check_image_kind
+ from spinalcordtoolbox.utils.sys import sct_test_path, __deepseg_dir__
+ import spinalcordtoolbox.deepseg.models
++import spinalcordtoolbox.deepseg.inference
+ 
+ from spinalcordtoolbox.scripts import sct_deepseg, sct_resample, sct_qc
+ 
+@@ -433,3 +435,44 @@ def test_deepseg_soft_seg_produces_expected_output(tmp_path, tmp_path_qc, task):
+     im_out = Image(fname_out)
+     # Check that the softseg output is a float image (not integer)
+     assert np.issubdtype(im_out.data.dtype, np.floating)
++
++
++def test_deepseg_nerves_single_input(tmp_path, capsys):
++    """
++    `nerves_lumbar_t2` takes one image at a time (checked before installing or running anything).
++    """
++    pytest.importorskip("nervesegmentator")  # optional package: without it, `sct_deepseg` stops before this check
++    fnames = [str(tmp_path / fname) for fname in ("t2_a.nii.gz", "t2_b.nii.gz")]
++    for fname in fnames:
++        Path(fname).touch()
++    with pytest.raises(SystemExit):
++        sct_deepseg.main(['nerves_lumbar_t2', '-i', *fnames])
++    assert "Please provide a single input file" in capsys.readouterr().err
++
++
++def test_segment_nervesegmentator_outputs(tmp_path):
++    """
++    Check what `sct_deepseg` gets back from NerveSegmentator, using a stand-in for the package's predictor
++    (the real one needs its models): one output per structure, and an error if the image can't be segmented.
++    """
++    class FakeNerveSegmentator:
++        def __init__(self, errors=()):
++            self.errors = list(errors)
++
++        def run(self, image, output_dir, spine_seg=None):
++            self.spine_seg = spine_seg
++            outputs = {} if self.errors else {s: Path(output_dir) / f"t2_{s}.nii.gz" for s in ("drg", "root")}
++            return [SimpleNamespace(status="failed" if self.errors else "ok", errors=self.errors, outputs=outputs)]
++
++    segment = sct.deepseg.inference.segment_nervesegmentator
++    predictor = FakeNerveSegmentator()
++    fnames_out, targets = segment("t2.nii.gz", str(tmp_path), predictor, device="cpu",
++                                  spine_seg="t2_totalspineseg_all.nii.gz")
++    assert predictor.spine_seg == "t2_totalspineseg_all.nii.gz"
++    assert targets == ["_drg", "_root"]
++    assert fnames_out == [str(tmp_path / "t2_drg.nii.gz"), str(tmp_path / "t2_root.nii.gz")]
++
++    predictor = FakeNerveSegmentator(errors=["The L5-S1 disc was not found."])
++    with pytest.raises(ValueError) as e:
++        segment("t2.nii.gz", str(tmp_path), predictor, device="cpu", spine_seg="t2_totalspineseg_all.nii.gz")
++    assert "The L5-S1 disc was not found." in str(e.value)

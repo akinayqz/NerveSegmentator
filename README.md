@@ -11,7 +11,7 @@ get the image plus two coordinate maps that say where each voxel lies relative t
 
 > **Status: pre-release.** The models are still being trained and no weights are published
 > yet: install them from a local nnU-Net folder (see [Weights](#weights)). Only T2w is
-> supported so far. The licence is not decided.
+> supported so far.
 
 ## Install
 
@@ -31,10 +31,11 @@ nerveseg_weights import /path/to/nnUNet_results/Dataset312_root -m root_t2
 nerveseg_weights list
 ```
 
-`import` takes an nnU-Net training output folder (or a zip made by `nerveseg_weights export`),
-keeps the final checkpoint of each fold without its optimizer state (about 120 MB per fold)
-and stores it in the data folder: `--data-dir`, else `$NERVESEGMENTATOR_DATA`, else
-`~/.nervesegmentator`. Once weights are published they are downloaded on first use.
+`import` takes an nnU-Net training output folder (or a zip made by `nerveseg_weights export`,
+as a file or a URL), keeps the final checkpoint of each fold without its optimizer state
+(about 120 MB per fold) and stores it in the data folder: `--data-dir`, else
+`$NERVESEGMENTATOR_DATA`, else `~/.nervesegmentator`. Once weights are published they are
+downloaded on first use.
 
 ## Usage
 
@@ -107,7 +108,7 @@ for r in ns.run(["sub-01_T2w.nii.gz", "sub-02_T2w.nii.gz"], "out"):
    `coordLR` (mm / 50 right of the centreline). `nerveseg_coords` writes the same channels to
    files for preparing training data.
 3. **Prediction** (`predict.py`): each model gets the channels it lists, in its training
-   orientation, and its folds are ensembled by nnU-Net.
+   orientation, and the predictions of its folds are averaged (nnU-Net's ensemble).
 4. **Labels** (`labels.py`): the model's values are mapped to the output values by level name.
 
 | | |
@@ -129,18 +130,31 @@ asset and set `release`, `url` and `sha256` of the model in `registry.py`. A ret
 needs nothing else, also when its label values or their order change. A new contrast (T1w) is
 one more `ModelSpec` in `registry.py`, selected with `--contrast`.
 
+A five-fold zip is about 565 MB. For a smaller and faster release, publish one network:
+train it on all cases (nnU-Net fold `all`) and export it the same way, or export one fold
+with `--folds 0`. Averaging the weights of the five folds is not an option: the averaged
+network segments nothing.
+
 The exported checkpoints name nnU-Net's stock trainer, so they load in any nnU-Net
 installation without our trainer class. This relies on the trainer changing the augmentation
 only, not the network.
 
 ### Spinal Cord Toolbox
 
-The package is meant to be called from `sct_deepseg` the way TotalSpineSeg is: SCT lists it
-as a dependency and calls `NerveSegmentator(...).run(...)` with its own weights folder
-(`data_dir=`) and the TotalSpineSeg weights it already has (`spine_data_dir=`). Prediction
-is tested with SCT's pins (Python 3.10, torch 2.2, numpy 1.26, `nnunetv2-neuropoly` 2.6.2);
-the adapter in SCT is still to be written. SCT's generic nnU-Net path cannot be used, because
-it gives a model one image as one channel.
+[`sct/`](sct/) holds a patch for SCT that adds the task `sct_deepseg nerves_lumbar_t2`, and
+says how to try it:
+
+```bash
+sct_deepseg nerves_lumbar_t2 -install
+sct_deepseg nerves_lumbar_t2 -i t2.nii.gz -spine-seg t2_totalspineseg_all.nii.gz
+```
+
+SCT keeps the models in its own folder and calls this package to install and run them, the
+way it does with TotalSpineSeg; the spine segmentation comes from `sct_deepseg spine`. The
+package runs with SCT's versions (Python 3.10, torch 2.2, numpy 1.26, `nnunetv2-neuropoly`)
+and gives the same segmentation there. For that, the folds are averaged in `predict.py`
+and not by nnU-Net: the fork that SCT installs runs and counts the first fold twice.
+SCT's generic nnU-Net path cannot be used, because it gives a model one image as one channel.
 
 ## Tests
 
@@ -149,3 +163,7 @@ pip install -e ".[all,dev]"
 pytest -m "not slow"             # no weights or data needed
 pytest -m slow                   # end to end: needs test_data/ and installed weights
 ```
+
+## Licence
+
+Apache-2.0, see [LICENSE](LICENSE).

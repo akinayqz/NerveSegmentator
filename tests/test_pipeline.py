@@ -47,6 +47,20 @@ def test_drg_against_manual_segmentation(test_data, tmp_path, device):
         assert dice(predicted, manual, value) > 0.7, level
 
 
+def test_ensemble_of_folds(test_data, tmp_path, device):
+    """Several folds: their logits are averaged in predict.py, not by nnU-Net's own loop."""
+    d = test_data / "subj1"
+    image, seg = d / "Sbj012_T2W_1mm_Mask.nii.gz", d / "Sbj012_T2W_spine_step1_output.nii.gz"
+    [result] = segment(image, tmp_path, spine_seg=seg, structures=["drg"], folds=[0, 1], tta=False,
+                       device=device, quiet=True)
+
+    assert json.loads(result.report.read_text())["models"]["drg"]["folds"] == [0, 1]
+    manual = np.asanyarray(nib.load(d / "DRG_012.nii.gz").dataobj)
+    predicted = np.asanyarray(nib.load(result.outputs["drg"]).dataobj)
+    for level, value in labels.LEVEL_VALUES.items():
+        assert dice(predicted, manual, value) > 0.7, level
+
+
 def test_same_result_whatever_the_orientation_of_the_input(test_data, tmp_path, device):
     d = test_data / "subj1"
     image = nib.load(d / "Sbj012_T2W_1mm_Mask.nii.gz")

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=67"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ dynamic = ["version"]
 description = "Segmentation of the lumbosacral (L2-S1) dorsal root ganglia and nerve roots in MRI"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 keywords = ["mri", "segmentation", "nnU-Net", "dorsal root ganglion", "nerve root", "lumbar spine"]
 dependencies = [
     "numpy",

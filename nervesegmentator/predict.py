@@ -30,6 +30,46 @@ def resolve_device(device="auto"):
     return device
 
 
+def _nnunet_predictor_class():
+    """nnU-Net's predictor, with the loop over the folds written out here.
+
+    The loop is the one of stock nnU-Net: the mean of the folds' logits. It is repeated
+    because the nnunetv2-neuropoly fork (2.6.2, the build Spinal Cord Toolbox installs)
+    predicts the first fold twice and adds it twice, which costs a forward pass and
+    changes the ensemble."""
+    # nnU-Net warns at import when these are unset; prediction does not use them
+    for var in ("nnUNet_raw", "nnUNet_preprocessed", "nnUNet_results"):
+        os.environ.setdefault(var, "")
+    import torch
+    from nnunetv2.configuration import default_num_processes
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+
+    class FoldMeanPredictor(nnUNetPredictor):
+        @torch.inference_mode()
+        def predict_logits_from_preprocessed_data(self, data, return_logits_per_fold=False):
+            if return_logits_per_fold:              # an option of the fork; not used here
+                return super().predict_logits_from_preprocessed_data(data, return_logits_per_fold=True)
+            n_threads = torch.get_num_threads()
+            torch.set_num_threads(min(default_num_processes, n_threads))
+            try:
+                network = getattr(self.network, "_orig_mod", self.network)      # compiled or not
+                prediction = None
+                for params in self.list_of_parameters:
+                    network.load_state_dict(params)
+                    logits = self.predict_sliding_window_return_logits(data).to("cpu")
+                    if prediction is None:
+                        prediction = logits
+                    else:
+                        prediction += logits
+                if len(self.list_of_parameters) > 1:
+                    prediction /= len(self.list_of_parameters)
+                return prediction
+            finally:
+                torch.set_num_threads(n_threads)
+
+    return FoldMeanPredictor
+
+
 class Predictor:
     def __init__(self, model, device="auto", folds=None, tta=True, quiet=False):
         """
@@ -37,11 +77,6 @@ class Predictor:
         folds   folds to ensemble (default: all the model has)
         tta     test-time mirroring along the axes the model was trained to be mirrored on
         """
-        # nnU-Net warns at import when these are unset; prediction does not use them
-        for var in ("nnUNet_raw", "nnUNet_preprocessed", "nnUNet_results"):
-            os.environ.setdefault(var, "")
-        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-
         self.model = model
         self.device = resolve_device(device)
         self.folds = tuple(model.folds if folds is None else folds)
@@ -51,7 +86,7 @@ class Predictor:
         labels.check(model.labels)
 
         with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):   # it prints a notice off CUDA
-            self._nnunet = nnUNetPredictor(
+            self._nnunet = _nnunet_predictor_class()(
                 tile_step_size=0.5, use_gaussian=True, use_mirroring=tta,
                 perform_everything_on_device=self.device.type == "cuda", device=self.device,
                 verbose=False, verbose_preprocessing=False, allow_tqdm=not quiet)

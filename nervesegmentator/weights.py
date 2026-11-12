@@ -207,18 +207,44 @@ def install_zip(zip_path, data=None):
     """Install a model from a zip made by export()."""
     models = data_dir(data) / "models"
     models.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=models) as tmp, zipfile.ZipFile(zip_path) as zf:
-        names = [n for n in zf.namelist() if not n.endswith("/")]
-        tops = {n.split("/")[0] for n in names}
-        if len(tops) != 1 or any(os.path.isabs(n) or ".." in Path(n).parts for n in names):
-            raise InputError(f"{zip_path} is not a NerveSegmentator model zip")
-        zf.extractall(tmp)
-        return _install_folder(Path(tmp) / tops.pop(), data)
+    try:
+        with tempfile.TemporaryDirectory(dir=models) as tmp, zipfile.ZipFile(zip_path) as zf:
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            tops = {n.split("/")[0] for n in names}
+            if (len(tops) != 1 or f"{min(tops)}/{META}" not in names
+                    or any(os.path.isabs(n) or ".." in Path(n).parts for n in names)):
+                raise InputError(f"{zip_path} is not a NerveSegmentator model zip")
+            zf.extractall(tmp)
+            return _install_folder(Path(tmp) / tops.pop(), data)
+    except zipfile.BadZipFile as e:
+        raise InputError(f"{zip_path} is not a NerveSegmentator model zip") from e
+
+
+def install_url(url, data=None, sha256=None):
+    """Download a zip made by export() and install the model in it. This is also how a host
+    application that keeps its own list of releases (Spinal Cord Toolbox) installs models."""
+    models = data_dir(data) / "models"
+    models.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=models) as tmp:
+        zip_path = Path(tmp) / re.sub(r"[^\w.-]", "_", url.rsplit("/", 1)[-1])
+        try:
+            with urllib.request.urlopen(url) as r, open(zip_path, "wb") as f:
+                size = r.headers.get("Content-Length")
+                log.info("downloading %s%s", url, f" ({int(size) / 1e6:.0f} MB)" if size else "")
+                shutil.copyfileobj(r, f, 1 << 20)
+        except OSError as e:                        # no connection, HTTP error
+            raise NerveSegmentatorError(f"could not download {url}: {e}") from e
+        if sha256 and _sha256(zip_path) != sha256:
+            raise NerveSegmentatorError(f"{url}: checksum mismatch, the download is incomplete or "
+                                        "not the expected release")
+        return install_zip(zip_path, data)
 
 
 def import_model(source, spec=None, data=None, release=None, folds=None):
-    """Install a model from a zip made by export(), or straight from an nnU-Net training
-    output folder (then `spec` says which model it is)."""
+    """Install a model from a zip made by export() (a file or its URL), or straight from an
+    nnU-Net training output folder (then `spec` says which model it is)."""
+    if str(source).startswith(("http://", "https://")):
+        return install_url(str(source), data)
     source = Path(source)
     if source.is_file():
         return install_zip(source, data)
@@ -242,13 +268,4 @@ def download(spec, data=None):
     """Download and install the published weights of `spec`."""
     if spec.url is None:
         raise ModelNotInstalled(f"model '{spec.id}' has no published weights yet")
-    models = data_dir(data) / "models"
-    models.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=models) as tmp:
-        zip_path = Path(tmp) / re.sub(r"[^\w.-]", "_", spec.url.rsplit("/", 1)[-1])
-        log.info("downloading %s", spec.url)
-        with urllib.request.urlopen(spec.url) as r, open(zip_path, "wb") as f:
-            shutil.copyfileobj(r, f, 1 << 20)
-        if spec.sha256 and _sha256(zip_path) != spec.sha256:
-            raise NerveSegmentatorError(f"{spec.url}: checksum mismatch, the download is incomplete or not release {spec.release}")
-        return install_zip(zip_path, data)
+    return install_url(spec.url, data, spec.sha256)

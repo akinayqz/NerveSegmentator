@@ -72,6 +72,28 @@ def test_download(nnunet_output, tmp_path):
         weights.download(dataclasses.replace(spec, sha256="0" * 64), tmp_path / "data2")
 
 
+def test_single_network_trained_on_all_cases(nnunet_output, tmp_path):
+    """nnU-Net calls the network trained on every case fold_all."""
+    (nnunet_output / "fold_0").rename(nnunet_output / "fold_all")
+    model = weights.import_model(nnunet_output, SPEC, tmp_path / "data", folds=["all"])
+    assert model.folds == ("all",)
+    assert [p.name for p in model.nnunet_dir.glob("fold_*")] == ["fold_all"]
+
+
+def test_install_url(nnunet_output, tmp_path):
+    """What a host application with its own list of releases calls (Spinal Cord Toolbox)."""
+    zip_path, _ = weights.export(nnunet_output, tmp_path / "release", SPEC, "r1")
+    model = weights.install_url(zip_path.as_uri(), tmp_path / "data")
+    assert (model.id, model.release) == ("drg_t2", "r1")
+    assert weights.installed("drg_t2", tmp_path / "data").folds == (0, 1)
+    with pytest.raises(NerveSegmentatorError, match="could not download"):
+        weights.install_url((tmp_path / "missing.zip").as_uri(), tmp_path / "data")
+    (tmp_path / "page.zip").write_text("<html>not found</html>")
+    with pytest.raises(InputError, match="not a NerveSegmentator model zip"):
+        weights.install_url((tmp_path / "page.zip").as_uri(), tmp_path / "data")
+    assert weights.installed("drg_t2", tmp_path / "data").release == "r1"      # still there
+
+
 def test_not_installed(tmp_path):
     assert weights.installed("drg_t2", tmp_path) is None
     with pytest.raises(ModelNotInstalled, match="nerveseg_weights import"):
@@ -103,3 +125,7 @@ def test_rejects_foreign_zip(tmp_path):
         zf.writestr("../outside.txt", "x")
     with pytest.raises(InputError):
         weights.install_zip(tmp_path / "bad.zip", tmp_path / "data")
+    with zipfile.ZipFile(tmp_path / "other.zip", "w") as zf:
+        zf.writestr("Dataset311_DRG/plans.json", "{}")
+    with pytest.raises(InputError):
+        weights.install_zip(tmp_path / "other.zip", tmp_path / "data")

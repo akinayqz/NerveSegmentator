@@ -96,9 +96,9 @@ def weights_main(argv=None):
     i = sub.add_parser("import", help="install weights from an nnU-Net training output folder or a model zip")
     e = sub.add_parser("export", help="package an nnU-Net training output folder as a release zip")
     for s in (i, e):
-        s.add_argument("source", type=Path,
+        s.add_argument("source",
                        help="nnU-Net training output folder (with plans.json and fold_*/), or the "
-                            "DatasetXXX folder above it" + ("; or a zip made by export" if s is i else ""))
+                            "DatasetXXX folder above it" + ("; or a zip made by export, or its URL" if s is i else ""))
         s.add_argument("-m", "--model", choices=list(registry.MODELS), required=s is e,
                        help="the model these weights are for")
         s.add_argument("--folds", nargs="+", type=_fold, metavar="N", help="folds to include (default: all)")
