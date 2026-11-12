@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=67"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nervesegmentator"
+dynamic = ["version"]
+description = "Segmentation of the lumbosacral (L2-S1) dorsal root ganglia and nerve roots in MRI"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["mri", "segmentation", "nnU-Net", "dorsal root ganglion", "nerve root", "lumbar spine"]
+dependencies = [
+    "numpy",
+    "nibabel",
+    "scipy",
+]
+
+# nnU-Net and TotalSpineSeg are extras so that a host environment can bring its own build
+# (Spinal Cord Toolbox ships a fork of nnunetv2):
+#   pip install "nervesegmentator[all]"                      nnunetv2 + totalspineseg from PyPI
+#   pip install "nervesegmentator[neuropoly,totalspineseg]"  the nnunetv2 fork used by SCT
+[project.optional-dependencies]
+nnunetv2 = ["nnunetv2>=2.6"]
+neuropoly = ["nnunetv2-neuropoly"]
+# kornia: TotalSpineSeg's augmentation library (auglab 20260109) imports kornia.core.Tensor,
+# which kornia 0.8.3 removed; without the cap nnU-Net cannot load the TotalSpineSeg models.
+totalspineseg = ["totalspineseg", "kornia<0.8.3"]
+all = ["nnunetv2>=2.6", "totalspineseg", "kornia<0.8.3"]
+dev = ["pytest"]
+
+[project.scripts]
+NerveSegmentator = "nervesegmentator.cli:main"
+nerveseg_weights = "nervesegmentator.cli:weights_main"
+nerveseg_coords = "nervesegmentator.cli:coords_main"
+
+[tool.setuptools]
+packages = ["nervesegmentator"]
+
+[tool.setuptools.dynamic]
+version = { attr = "nervesegmentator.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: runs the networks; needs installed weights and test_data/ (deselect with -m 'not slow')",
+]

@@ -1,0 +1,22 @@
+# Model weights and nnU-Net training outputs: published as release assets, never committed
+Dataset*/
+*.pth
+*.safetensors
+/release/
+
+# Subject data
+test_data/
+
+# Local environment and locally installed weights
+.venv*/
+.nerveseg_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+.DS_Store
